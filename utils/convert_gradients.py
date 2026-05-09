@@ -36,7 +36,7 @@ def group_by_layer_and_merge(
     ):
     if ('t5' in model_name.lower() or 'bert' in model_name.lower() or 'qwen' in model_name.lower()) and merge_option == 'by_layer':
         if start_layer != -1 or end_layer != -1:
-            sorted_items = sorted_items[start_layer*7:end_layer*7]
+            sorted_items = sorted_items[start_layer*1:end_layer*1]
         
         if print_layers:
             for i in sorted_items:
@@ -49,7 +49,7 @@ def group_by_layer_and_merge(
             v = torch.flatten(v)
             tmp_lst.append(v)
 
-            if len(tmp_lst) == 7:
+            if len(tmp_lst) == 1:
                 layer_tensor = torch.cat(tmp_lst, dim=0)
                 layer_lst.append(layer_tensor)
                 tmp_lst = []

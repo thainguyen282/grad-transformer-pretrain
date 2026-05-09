@@ -13,12 +13,12 @@ from accelerate.utils import set_seed
 from accelerate.logging import get_logger
 import logging
 import evaluate
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, TaskType, get_peft_model
 from utils.transformer import Embedding2EmbeddingT5
 from utils.convert_gradients import split_tensor_to_lora, parse_key, split_tensor_to_lora_xs
 from tqdm import tqdm
-from loraxs_utils.initialization_utils import find_and_initialize
+from lora_utils.initialization_utils import find_and_initialize
 from utils.reinit_target_model import build_reinitalized_model
 from utils.evaluate_model import evaluate
 
@@ -55,14 +55,6 @@ def run_rvkd_inference_pretrain(args):
     args_dict = vars(args)
     for k, v in args_dict.items():
         print(f"  {k}: {v}")
-    seed = args.seed
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    set_seed(seed)
     accelerator = Accelerator(
         log_with="wandb", 
         mixed_precision="bf16",
@@ -75,18 +67,21 @@ def run_rvkd_inference_pretrain(args):
     if args.quantize:
         raise NotImplementedError("Quantization is currently not supported for pretraining")
     else:
-        large_model = build_reinitalized_model(args)
+        # large_model = build_reinitalized_model(args)
+        large_model = AutoModelForCausalLM.from_pretrained(
+            args.pretrain_model_path, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+    large_model.config.tie_word_embeddings = False
+    large_model.tie_weights = False
+
     
     large_lora_config = LoraConfig(
         r=args.loraxs_rank,
         lora_alpha=256,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "lm_head"],
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
-    
-    set_seed(seed)
     large_model = get_peft_model(large_model, large_lora_config)
     adapter_name = "default"
     peft_config_dict = {adapter_name: large_lora_config}
@@ -98,21 +93,32 @@ def run_rvkd_inference_pretrain(args):
 
     find_and_initialize(large_model, peft_config_dict,
         adapter_name=adapter_name, reconstr_type='svd', reconstruct_config=reconstr_config)
-    large_model.to(device)
+    
+    payload = torch.load(args.loraxs_model_path, map_location="cpu")
+    lora_sd = payload["state_dict"]
+    dtype = next(large_model.parameters()).dtype
+    dev = next(large_model.parameters()).device
+    lora_sd = {k: v.to(device=dev, dtype=dtype) for k, v in lora_sd.items()}
+    missing, unexpected = large_model.load_state_dict(lora_sd, strict=False)
 
-    print("The following large weights are tuned:")
-    for name, param in large_model.named_parameters():
-        if param.requires_grad:
-            print(name, param.shape)
-            print(name, param[0])
-            break
+    if missing:
+        print("Missing keys:")
+        for k in missing:
+            print(f"  {k}")
+
+    if unexpected:
+        print("Unexpected keys:")
+        for k in unexpected:
+            print(f"  {k}")
     
     transform_model = Embedding2EmbeddingT5(input_dim=args.dim, output_dim=args.dim, base_model=args.base_model_path)
     transform_model.load_state_dict(torch.load(args.transform_model_path, weights_only=True))
     transform_model.to(device)
-    transform_model.to(torch.float32)
-    
-    small_lora_gradients = torch.load(args.small_model_gradient_path, weights_only=True).to(device)
+    transform_model.to(torch.bfloat16)
+
+    small_lora_gradients = torch.load(args.small_model_gradient_path, weights_only=True).to(
+        device=device, dtype=torch.bfloat16
+    )
     small_lora_gradients = torch.unsqueeze(small_lora_gradients, 0)
 
     large_gradients = transform_model(small_lora_gradients, use_teacher_forcing=False, L_out=args.l_out)
@@ -126,6 +132,32 @@ def run_rvkd_inference_pretrain(args):
     with torch.no_grad():
         large_model.eval()
         predicted_large_model = apply_gradients_xs(large_model, predicted_large_lora_gradients)
-        result = evaluate(predicted_large_model, args)
-        print(f"Predicted large model: {result} on {args.dataset_path}")   
-        torch.save(predicted_large_model.state_dict(), args.save_path)
+        tok = AutoTokenizer.from_pretrained(args.pretrain_model_path, padding_side="left")
+        _p = (
+            "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. "
+            "You are a helpful assistant.<|im_end|>\n<|im_start|>user\n"
+            "What is 2+2? Answer briefly."
+            "<|im_end|>\n<|im_start|>assistant\n"
+        )
+        enc = tok(_p, return_tensors="pt")
+        mdev = next(predicted_large_model.parameters()).device
+        input_ids = enc["input_ids"].to(mdev)
+        attn = enc["attention_mask"].to(mdev)
+        plen = input_ids.shape[1]
+        gen = predicted_large_model.generate(
+            input_ids=input_ids,
+            attention_mask=attn,
+            max_new_tokens=min(args.max_new_tokens, 256),
+            bos_token_id=tok.bos_token_id,
+            pad_token_id=tok.pad_token_id,
+            eos_token_id=[tok.eos_token_id, tok.pad_token_id],
+            use_cache=True,
+        )
+        print("=== single-prompt preview ===")
+        print(tok.decode(gen[0, plen:].cpu(), skip_special_tokens=True))
+        print("=== end preview ===")
+
+        # result = evaluate(predicted_large_model, args)
+        # print(f"Predicted large model: {result} on {args.dataset_path}")
+        torch.save(predicted_large_model.state_dict(), os.join(args.save_dir, "new_model", args.pretrain_model_path))
+

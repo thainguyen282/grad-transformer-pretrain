@@ -12,13 +12,14 @@ from accelerate.utils import set_seed
 from torch.nn.utils.rnn import pad_sequence
 from datasets import Dataset
 
-from dataset import CustomDataset, random_sample
-from eval_math import evaluate_math_reasoning_accuracy
-from src.utils import Prompter, generate_and_tokenize_prompt
+from utils.dataset import CustomDataset, random_sample
+from utils.eval_math import evaluate_math_reasoning_accuracy
+from utils.prompter_utils import Prompter, generate_and_tokenize_prompt
 
 def compute_metrics(eval_pred, dataset_path, ans_template="####", ref_template="####", tokenizer=None, rouge=None):
     predictions, labels = eval_pred
     decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+    print(f"prediction: {decoded_preds}")
     labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
@@ -74,28 +75,17 @@ def evaluate_model(model, val_dataloader, tokenizer=None, device=None, max_new_t
     return compute_metrics((predictions, labels), dataset_path=dataset_path, ans_template=ans_template, ref_template=ref_template, tokenizer=tokenizer, rouge=rouge)
 
 
-def evaluate(model, args):
-    accelerator = Accelerator(mixed_precision="bf16")
-    device = accelerator.device
-    pretrained_model_path = os.path.join(args.save_dir, "random_init_model", args.pretrained_model_name)
-
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    set_seed(args.seed)
-    rouge = evaluate.load("rouge", keep_in_memory=True)
-    
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_path, padding_side="left")
-
+def build_pretrain_val_dataloader(args, tokenizer, *, for_perplexity: bool = False):
+    """
+    Build the validation DataLoader used for pretrain RVKD evaluation (same tokenization
+    as evaluate_pretrain_model). Caller should set RNG seeds if reproducibility is needed.
+    """
     dataset = CustomDataset(path=args.dataset_path)
     _, val_dataset, test_dataset = dataset.split_dataset()
     if val_dataset is None:
         val_dataset = test_dataset
-    if args.num_samples:
-        val_dataset = random_sample(val_dataset, args.num_samples)
+    if args.num_samples_per_val_dataset:
+        val_dataset = random_sample(val_dataset, args.num_samples_per_val_dataset)
 
     if 'aqua_rat' in args.dataset_path.lower():
         val_dataset = val_dataset.map(
@@ -201,7 +191,7 @@ def evaluate(model, args):
             fn_kwargs={'mode': 'inference'}
         )
 
-    prompter = Prompter()
+    prompter = Prompter(args.chat_template_path)
     val_dataset = Dataset.from_dict(generate_and_tokenize_prompt(val_dataset, prompter, tokenizer))
     tokenized_val_dataset = val_dataset.map(
         dataset.preprocess_function_causal,
@@ -217,11 +207,31 @@ def evaluate(model, args):
             'padding': True,
             'truncation': True,
             'tokenizer': tokenizer,
-            'mode': 'inference'
+            'mode': 'perplexity' if for_perplexity else 'inference'
         },
     )
 
-    val_dataloader = DataLoader(tokenized_val_dataset, batch_size=8, collate_fn=default_data_collator)
+    val_dataloader = DataLoader(tokenized_val_dataset, batch_size=1, collate_fn=default_data_collator)
+    return val_dataloader
+
+
+def evaluate_pretrain_model(model, args):
+    accelerator = Accelerator(mixed_precision="bf16")
+    device = accelerator.device
+
+    pretrain_model_path = args.pretrain_model_path
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
+    rouge = evaluate.load("rouge", keep_in_memory=True)
+    
+    tokenizer = AutoTokenizer.from_pretrained(pretrain_model_path, padding_side="left")
+    val_dataloader = build_pretrain_val_dataloader(args, tokenizer)
 
     result = evaluate_model(model, val_dataloader, tokenizer=tokenizer, device=device, max_new_tokens=args.max_new_tokens, dataset_path=args.dataset_path, ans_template=args.ans_template, ref_template=args.ref_template, rouge=rouge)
     return result

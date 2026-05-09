@@ -1,6 +1,7 @@
 import math
 import torch
-from typing import List
+from typing import Dict
+
 
 def clipping_noise(tensor: torch.Tensor, threshold: float) -> torch.Tensor:
     l2_norm = torch.norm(tensor, p=2)
@@ -9,34 +10,36 @@ def clipping_noise(tensor: torch.Tensor, threshold: float) -> torch.Tensor:
     scale = min(1.0, threshold / l2_norm)
     return tensor * scale
 
-def add_gaussian_noise_to_tensor(tensor: torch.Tensor, std: float, noise_boundary: float, random_seed: int) -> torch.Tensor:
-    torch.manual_seed(random_seed)
-    noise = torch.normal(0.0, std, size=tensor.shape, device=tensor.device, dtype=tensor.dtype)
-    noise  = clipping_noise(noise, noise_boundary)
-    return tensor + noise
-
-def add_gaussian_noise_to_tensor_list(
-    tensors: List[torch.Tensor],
+def add_gaussian_noise_to_tensor(
+    tensors: Dict[str, torch.Tensor],
     std: float,
     noise_boundary: float,
     base_seed: int,
     device: torch.device,
-) -> List[torch.Tensor]:
-    noises = []
-    for layer_idx, tensor in enumerate(tensors):
+) -> Dict[str, torch.Tensor]:
+    noises = {}
+    items = list(tensors.items())  # stable order for seed assignment
+    for layer_idx, (name, tensor) in enumerate(items):
         torch.manual_seed(base_seed + layer_idx)
         t_dev = tensor.to(device)
         noise = torch.normal(0.0, std, size=t_dev.shape, device=device, dtype=t_dev.dtype)
-        noises.append(noise.cpu())
+        noises[name] = noise.cpu()
         del t_dev
         if device.type == "cuda":
             torch.cuda.empty_cache()
-
-    combined_l2 = math.sqrt(sum(torch.norm(n, p=2).item() ** 2 for n in noises))
-    print(f"Combined L2 norm of noise: {combined_l2}")
-    print(f"Noise boundary: {noise_boundary}")
+    combined_l2 = math.sqrt(sum(torch.norm(n, p=2).item() ** 2 for n in noises.values()))
     scale = min(1.0, noise_boundary / combined_l2) if combined_l2 > 0 else 1.0
+    return {name: tensors[name] + noises[name] * scale for name in tensors}
 
-
-
-    return [tensor + noise * scale for tensor, noise in zip(tensors, noises)]
+def add_gaussian_noise_to_model_dict(
+    model: list[tuple[str, tuple[torch.Tensor, torch.Tensor]]], 
+    std:float,
+    noise_boundary:float,
+    base_seed: int, 
+    device: torch.device,
+) -> list[tuple[str, tuple[torch.Tensor, torch.Tensor]]]:
+    noises = {}
+    for i, name, (lora_A, lora_B) in enumerate(model):
+        torch.manual_seed(base_seed + i)
+        t_dev = model.to(device)
+        

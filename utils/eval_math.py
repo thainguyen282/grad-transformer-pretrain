@@ -1,5 +1,5 @@
 import math
-from grader import math_equal
+from utils.grader import math_equal
 import wandb
 import re
 

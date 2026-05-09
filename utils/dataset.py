@@ -404,6 +404,45 @@ class CustomDataset:
                 padding=padding,
                 truncation=truncation
             )
+        elif mode == "perplexity":
+            # Build a single concatenated sequence so logits and labels are aligned.
+            # Compute loss only on target tokens by masking the prompt portion with -100.
+            inputs = [prefix + str(doc) + postfix for doc in examples[input_key]]
+            targets = examples[target_key]
+
+            # Important: keep the boundary explicit for prompt-length computation.
+            prompts = inputs
+            full_texts = [p + t + "<|im_end|>" for p, t in zip(prompts, targets)]
+
+            print(
+                f"===EXAMPLE SAMPLE (PERPLEXITY)===\nPROMPT:\n{prompts[0]}\n"
+                f"==========\nTARGET:\n{targets[0]}\n==========\nFULL:\n{full_texts[0]}"
+            )
+
+            model_inputs = tokenizer(
+                full_texts,
+                max_length=max_length,
+                padding=padding,
+                truncation=truncation,
+            )
+
+            prompt_tokens = tokenizer(
+                prompts,
+                truncation=truncation,
+            )["input_ids"]
+
+            pad_id = tokenizer.pad_token_id
+            labels = []
+            for full_ids, prompt_ids in zip(model_inputs["input_ids"], prompt_tokens):
+                prompt_len = len(prompt_ids)
+                lab = []
+                for i, tok_id in enumerate(full_ids):
+                    if i < prompt_len or tok_id == pad_id:
+                        lab.append(-100)
+                    else:
+                        lab.append(tok_id)
+                labels.append(lab)
+            model_inputs["labels"] = labels
         elif mode == 'inference':
             inputs = [prefix + str(doc) + postfix for doc in examples[input_key]]
             targets = examples[target_key]

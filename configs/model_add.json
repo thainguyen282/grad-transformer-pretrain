@@ -1,0 +1,13 @@
+{
+    "models": [
+      {
+        "path": "Qwen/Qwen2.5-14B-Instruct",
+        "noise_boundary": 689.37
+      }, 
+      {
+        "path": "Qwen/Qwen2.5-32B-Instruct",
+        "noise_boundary": 1059
+      }
+    ]
+  }
+  

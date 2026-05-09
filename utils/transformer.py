@@ -10,8 +10,6 @@ import wandb
 import numpy as np
 import random
 import logging
-from calflops import calculate_flops
-
 
 class Embedding2EmbeddingT5(nn.Module):
     def __init__(self, input_dim, output_dim, base_model='google/flan-t5-small', freeze_t5=False):
@@ -43,7 +41,7 @@ class Embedding2EmbeddingT5(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-    def forward(self, x, y=None, L_out=1, use_teacher_forcing=False, decoder_attention_mask=None):
+    def forward(self, x, y=None, L_out=1, use_teacher_forcing=False, encoder_attention_mask=None, decoder_attention_mask=None):
         """
         Args:
             x: [B, L_in, input_dim] input embedding sequence
@@ -57,7 +55,6 @@ class Embedding2EmbeddingT5(nn.Module):
 
         # Project encoder inputs
         encoder_input = self.input_proj(x)
-        encoder_attention_mask = torch.ones((B, L_in), dtype=torch.long, device=x.device)
 
         if use_teacher_forcing:
             assert y is not None, "y must be provided during teacher forcing"

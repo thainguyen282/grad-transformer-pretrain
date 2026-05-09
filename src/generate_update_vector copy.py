@@ -33,14 +33,6 @@ from utils.weight_initialize import init_weights_kaiming, init_lora_kaiming
 from utils.padding import add_padding
 import gc
 
-"""
-This file goal to create the data structure of the method
-Crawl the target module of each layer and its meta information
-Create two data structure 
-1. List of all target module projection layer 
-2. List of all meta information respective to the list of above projection layer
-"""
-
 def compute_target_shapes(models: list[dict]) -> dict[str, tuple[int, int]]:
     proj_names = models[0]["proj_shapes"].keys()
     return {
@@ -104,7 +96,7 @@ def generate_update_vector(args, console: Console):
         #     noise_model = add_gaussian_noise_to_dict(update_vector)
             
 
-        padded_update_vector = add_padding(update_vector, hidden_state=3584, rank=args.lora_rank)
+        padded_update_vector = add_padding(update_vector, unified_format_shape, rank=args.lora_rank)
         if args.merge_option == 'by_layer':
             merged_tensor = group_by_layer_and_merge(
                 padded_update_vector, 
@@ -112,6 +104,7 @@ def generate_update_vector(args, console: Console):
                 args.merge_option,
             )
             print(merged_tensor.shape)
+            exit()
         elif args.merge_option == 'flatten':
             merged_tensor = flatten_and_merge(padded_update_vector)
         

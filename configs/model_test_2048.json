@@ -1,0 +1,43 @@
+{
+  "models": [
+    {
+      "path": "Qwen/Qwen2.5-1.5B-Instruct",
+      "noise_boundary": 108.59,
+      "proj_shapes": {
+        "q_proj":    [1536, 1536],
+        "k_proj":    [256,  1536],
+        "v_proj":    [256,  1536],
+        "o_proj":    [1536, 1536],
+        "down_proj": [1536, 8960],
+        "gate_proj": [8960, 1536],
+        "up_proj":   [8960, 1536]
+      }
+    },
+    {
+      "path": "Qwen/Qwen2.5-3B-Instruct",
+      "noise_boundary": 316.0,
+      "proj_shapes": {
+        "q_proj":    [2048, 2048],
+        "k_proj":    [256,  2048],
+        "v_proj":    [256,  2048],
+        "o_proj":    [2048, 2048],
+        "down_proj": [2048, 11008],
+        "gate_proj": [11008, 2048],
+        "up_proj":   [11008, 2048]
+      }
+    },
+    {
+      "path": "Qwen/Qwen2.5-7B-Instruct",
+      "noise_boundary": 484.68,
+      "proj_shapes": {
+        "q_proj":    [3584, 3584],
+        "k_proj":    [512,  3584],
+        "v_proj":    [512,  3584],
+        "o_proj":    [3584, 3584],
+        "down_proj": [3584, 18944],
+        "gate_proj": [18944, 3584],
+        "up_proj":   [18944, 3584]
+      }
+    }
+  ]
+}
