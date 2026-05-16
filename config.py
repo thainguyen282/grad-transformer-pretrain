@@ -1,6 +1,5 @@
 import argparse
 import os
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 from rich.console import Console
 from rich.table import Table
 
@@ -42,7 +41,7 @@ def add_general_args(parser):
         help='Flattened delta / embedding dimension.',
     )
     parser.add_argument(
-        '--num_noisy_samples', type=int, default=5,
+        '--num_noisy_samples', type=int, default=4,
         help='Number of noisy variants to generate per model.',
     )
     parser.add_argument(
@@ -68,21 +67,21 @@ def add_general_args(parser):
 
 def add_update_vector_args(parser):
     parser.add_argument(
-        '--model_config', type=str, default=os.path.join(PROJECT_ROOT, "configs", "model_test_2048.json"),
+        '--model_config', type=str, default=os.path.join("configs", "model_test_2048.json"),
         help='JSON listing models; each entry needs "path" and "noise_boundary".',
-    )
-    parser.add_argument(
-        '--delta_noise_std', type=float, default=0.1,
-        help='Std of Gaussian noise added to the merged delta tensor.',
     )
     parser.add_argument(
         '--merge_option', type=str, choices=['by_layer', 'flatten'], default='by_layer',
         help='How to structure merged updated vectors: per-layer or flattened.',
     )
+    parser.add_argument(
+        '--std', type=float, default=0.1, 
+        help='Standard deviation of gaussian noise to sample more data'
+    )
 
 def add_train_grad_transformer_args(parser):
     parser.add_argument(
-        '--model_pairs_config', type=str, default=os.path.join(PROJECT_ROOT, "configs", "model_pairs_config_smallscale.json"),
+        '--model_pairs_config', type=str, default=os.path.join("configs", "model_pairs_config_smallscale.json"),
         help='JSON config for (small, large) model pairs used in training.',
     )
     parser.add_argument(
@@ -98,7 +97,7 @@ def add_train_grad_transformer_args(parser):
         help='Number of training epochs.',
     )
     parser.add_argument(
-        '--batch_size', type=int, default=16,
+        '--batch_size', type=int, default=1,
         help='Minibatch size.',
     )
     parser.add_argument(

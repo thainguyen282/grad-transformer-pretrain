@@ -1,8 +1,7 @@
 from config import parse_args
-from pretrain_src.generate_update_vector import generate_update_vector
-from pretrain_src.rvkd_inference_pretrain import run_rvkd_inference_pretrain
-from pretrain_src.train_grad_transformer import run_train_grad_transformer
-from finetune_src.finetune_quadrail_qwen_loraxs import run_finetune_guardrail_qwen_loraxs
+from src.generate_update_vector import generate_update_vector
+from src.rvkd_inference_pretrain import run_rvkd_inference_pretrain
+from src.train_grad_transformer import run_train_grad_transformer
 from config import print_args
 import random
 import torch
@@ -28,8 +27,6 @@ def run_pipeline(args, console):
         if args.pretrain_stage in ("3", "all"):
             # Step 3: RVKD inference pretrain
             run_rvkd_inference_pretrain(args, console)
-    elif args.train_option == "finetune":
-        run_finetune_guardrail_qwen_loraxs(args, console)
     else:
         raise ValueError(f"Unsupported train_option")
 

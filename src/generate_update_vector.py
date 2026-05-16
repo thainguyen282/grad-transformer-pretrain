@@ -19,11 +19,9 @@ from lora_utils.svd_utils import get_linear_rec_svd
 # from utils.get_update_vector import lora_update_vector, loraxs_update_vector
 from utils.convert_gradients import group_by_layer_and_merge, flatten_and_merge
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-sys.path.insert(0, project_root)
-
-from utils.gaussian_noise_injection import add_gaussian_noise_to_tensor
+from utils.gaussian_noise_injection import add_gaussian_noise_to_tensor, add_gaussian_noise_to_model_dict
 from lora_utils.initialization_utils import find_and_initialize
+from utils.get_raw_data import get_raw_data
 # from utils.convert_gradients import (
 #     parse_key,
 #     group_by_layer_and_merge,
@@ -60,19 +58,14 @@ def generate_update_vector(args, console: Console):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     init_empty_device = "cpu"
 
-
-    model_config_path = os.path.join(project_root, args.model_config)
-    with open(model_config_path, "r") as f:
+    with open(args.model_config, "r") as f:
         model_config = json.load(f)
     models = model_config["models"]
     log_rich(
-        f"Loaded [yellow]{len(models)}[/yellow] model(s) from [yellow]{model_config_path}[/yellow]",
+        f"Loaded [yellow]{len(models)}[/yellow] model(s) from [yellow]{args.model_config}[/yellow]",
         console,
         newline=True,
     )
-
-
-    unified_format_shape = compute_target_shapes(models)
 
     for entry in models:
         model_path = entry["path"]
@@ -84,43 +77,53 @@ def generate_update_vector(args, console: Console):
             torch_dtype=torch.bfloat16,
         )
 
-        update_vector = []
-        for k, v in tqdm(model.state_dict().items()):
-            if not any(k.endswith(f"{t}.weight") for t in target_modules):
-                continue
+        ### extract target module and meta information
 
-            svd = get_linear_rec_svd(
-                v,
-                rank=args.lora_rank,
-                n_iter=10,
-                random_state=42
-            )[1:3]
+        update_vector, meta_information = get_raw_data(model, target_modules)
+        dir = os.path.join(args.save_dir, model_path)
+        os.makedirs(dir, exist_ok=True)
+        torch.save(meta_information, os.path.join(dir, "meta_information.pt"))
+        torch.save(update_vector, os.path.join(dir, "gradient_base.pt"))
 
-            kai = init_lora_kaiming(v, args.lora_rank)
+        for i in tqdm(range(args.num_noisy_samples), desc="Sampling Data"):
+            sample_update_vector = add_gaussian_noise_to_model_dict(
+                model=update_vector,
+                std=args.std,
+                noise_boundary=noise_boundary,
+                base_seed=args.seed + i,   # shift seed per sample for diversity
+                device=device,
+            )
 
-            update_vector.append((k, (svd[0] - kai[0], svd[1] - kai[1])))
+            torch.save(sample_update_vector, os.path.join(dir, f"sample_{i}.pt"))
+            tqdm.write(f"Done generate sample {i}")
+   
+
+
+
+        ### Group and Padding 
 
         # for i in range(args.num_noisy_samples):
         #     noise_model = add_gaussian_noise_to_dict(update_vector)
             
+        # padded_update_vector = add_padding(update_vector, target_size=3584)
 
-        padded_update_vector = add_padding(update_vector, hidden_state=3584, rank=args.lora_rank)
-        if args.merge_option == 'by_layer':
-            merged_tensor = group_by_layer_and_merge(
-                padded_update_vector, 
-                args.model_name, 
-                args.merge_option,
-            )
-            print(merged_tensor.shape)
-        elif args.merge_option == 'flatten':
-            merged_tensor = flatten_and_merge(padded_update_vector)
+
+    #     if args.merge_option == 'by_layer':
+    #         merged_tensor = group_by_layer_and_merge(
+    #             padded_update_vector, 
+    #             args.model_name, 
+    #             args.merge_option,
+    #         )
+    #         print(merged_tensor.shape)
+    #     elif args.merge_option == 'flatten':
+    #         merged_tensor = flatten_and_merge(padded_update_vector)
         
-        save_path = os.path.join(args.save_dir, f"gradients/{label}/gradient_base.pt")
-        print(f"save base gradient to {save_path}")
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        torch.save(merged_tensor, save_path)
+    #     save_path = os.path.join(args.save_dir, f"gradients/{label}/gradient_base.pt")
+    #     print(f"save base gradient to {save_path}")
+    #     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    #     torch.save(merged_tensor, save_path)
 
-        del model, padded_update_vector, merged_tensor
-        torch.cuda.empty_cache()
+    #     del model, padded_update_vector, merged_tensor
+    #     torch.cuda.empty_cache()
 
-    log_rich("Done. All tensors saved to disk.", console, newline=True)
+    # log_rich("Done. All tensors saved to disk.", console, newline=True)

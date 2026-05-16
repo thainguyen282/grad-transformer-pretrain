@@ -32,14 +32,28 @@ def add_gaussian_noise_to_tensor(
     return {name: tensors[name] + noises[name] * scale for name in tensors}
 
 def add_gaussian_noise_to_model_dict(
-    model: list[tuple[str, tuple[torch.Tensor, torch.Tensor]]], 
+    model: list[torch.Tensor], 
     std:float,
     noise_boundary:float,
     base_seed: int, 
     device: torch.device,
 ) -> list[tuple[str, tuple[torch.Tensor, torch.Tensor]]]:
-    noises = {}
-    for i, name, (lora_A, lora_B) in enumerate(model):
+    noises = []
+
+    for i, weight in enumerate(model):
         torch.manual_seed(base_seed + i)
-        t_dev = model.to(device)
-        
+        weight_dev = weight.to(device)
+        noise = torch.normal(0.0, std, size=weight_dev.shape, device=device, dtype=weight_dev.dtype)
+        noises.append(noise.cpu())
+
+        del weight_dev
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    combined_l2 = math.sqrt(
+        sum(torch.norm(noise, p=2).item() ** 2 for noise in noises)
+    )
+    scale = min(1.0, noise_boundary / combined_l2) if combined_l2 > 0 else 1.0
+    return [
+        (weight + noises[idx] * scale)
+        for idx, weight in enumerate(model)
+    ]

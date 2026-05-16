@@ -1,7 +1,7 @@
 {
     "model_pairs": [
       {
-        "small_model_path": "Qwen2.5-1.5B-Instruct",
+        "small_model_path": "Qwen2.5-3B-Instruct",
         "large_model_path": "Qwen2.5-7B-Instruct"
       }
     ]

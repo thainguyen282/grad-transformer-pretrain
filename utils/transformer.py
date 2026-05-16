@@ -11,28 +11,67 @@ import numpy as np
 import random
 import logging
 
+from models.pd_resnet import pdresnet50
+from models.decnn import DECNN
+
+
+import torch
+import torchvision
+import torchvision.transforms as transforms
+
 class Embedding2EmbeddingT5(nn.Module):
     def __init__(self, input_dim, output_dim, base_model='google/flan-t5-small', freeze_t5=False):
         super().__init__()
-        if 'flan-t5' in base_model:
-            self.t5 = T5ForConditionalGeneration.from_pretrained(base_model)
-            self.d_model = self.t5.config.d_model  # T5 hidden size
-        elif 'gemma' in base_model:
-            self.t5 = T5GemmaForConditionalGeneration.from_pretrained(base_model)
-            self.d_model = self.t5.config.hidden_size  # T5 hidden size
+        # if 'flan-t5' in base_model:
+        #     self.t5 = T5ForConditionalGeneration.from_pretrained(base_model)
+        #     self.d_model = self.t5.config.d_model  # T5 hidden size
+        # elif 'gemma' in base_model:
+        #     self.t5 = T5GemmaForConditionalGeneration.from_pretrained(base_model)
+        #     self.d_model = self.t5.config.hidden_size  # T5 hidden size
 
         # New layers
-        self.input_proj = nn.Linear(input_dim, self.d_model)
-        self.output_proj = nn.Linear(self.d_model, output_dim)
-        self.embed_proj = nn.Linear(output_dim, self.d_model)
+        # self.input_proj = pdresnet50(pretrained=False) # add num_classes if need to change dim
+        self.input_proj = torchvision.models.resnet18(pretrained=False)
+        self.input_proj.conv1 = nn.Conv2d(
+            in_channels=1,
+            out_channels=64,
+            kernel_size=7,
+            stride=2,
+            padding=3,
+            bias=False
+        )
+        self.input_proj.fc = nn.Identity()
+        # self.output_proj = DECNN()
+        # self.output_proj = pdresnet50(pretrained=False)
+        # self.embed_proj = pdresnet50(pretrained=False)
+        # self.output_proj = torchvision.models.resnet50(pretrained=False)
+        # self.output_proj.conv1 = nn.Conv2d(
+        #     in_channels=1,
+        #     out_channels=64,
+        #     kernel_size=7,
+        #     stride=2,
+        #     padding=3,
+        #     bias=False
+        # )
+        # self.embed_proj = torchvision.models.resnet50(pretrained=False)
+        # self.embed_proj.conv1 = nn.Conv2d(
+        #     in_channels=1,
+        #     out_channels=64,
+        #     kernel_size=7,
+        #     stride=2,
+        #     padding=3,
+        #     bias=False
+        # )
+        # self.input_proj = nn.Linear(input_dim, self.d_model)
+        # self.embed_proj = nn.Linear(output_dim, self.d_model)
 
         # Initialize new layers
-        self._init_weights()
+        # self._init_weights()
 
         # Optionally freeze T5 weights
-        if freeze_t5:
-            for param in self.t5.parameters():
-                param.requires_grad = False
+        # if freeze_t5:
+        #     for param in self.t5.parameters():
+        #         param.requires_grad = False
 
     def _init_weights(self):
         # Xavier uniform initialization for all new Linear layers
@@ -41,7 +80,7 @@ class Embedding2EmbeddingT5(nn.Module):
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
 
-    def forward(self, x, y=None, L_out=1, use_teacher_forcing=False, encoder_attention_mask=None, decoder_attention_mask=None):
+    def forward(self, x, y=None, embedding_mask_x = None, embedding_mask_y = None, encoder_attention_mask=None, decoder_attention_mask=None, L_out=1, use_teacher_forcing=False, chunk_size=1):
         """
         Args:
             x: [B, L_in, input_dim] input embedding sequence
@@ -51,50 +90,90 @@ class Embedding2EmbeddingT5(nn.Module):
         Returns:
             predicted: [B, L_out, output_dim]
         """
-        B, L_in, _ = x.shape
+        B, L_in, C, W, H = x.shape
+        if len(x.shape) == 5:
+            if B != 1:
+                assert ValueError("current code only support batch = 1")
+            x = torch.squeeze(x, 0)
+            embedding_mask_x = torch.squeeze(embedding_mask_x, 0)
+        if len(y.shape) == 5:
+            if B != 1:
+                assert ValueError("current code only support batch = 1")
+            y = torch.squeeze(y, 0)
+            embedding_mask_y = torch.squeeze(embedding_mask_y, 0)
 
         # Project encoder inputs
-        encoder_input = self.input_proj(x)
+        print("Start generating")
+        chunks = []
 
-        if use_teacher_forcing:
-            assert y is not None, "y must be provided during teacher forcing"
-            # Shift y right and embed it to T5 space
-            decoder_inputs = torch.zeros_like(y)
-            decoder_inputs[:, 1:] = y[:, :-1]  # shift right
-            decoder_inputs_embeds = self.embed_proj(decoder_inputs)
+        for start in range(0, x.size(0), chunk_size):
 
-            # Training path
-            out = self.t5(
-                inputs_embeds=encoder_input,
-                decoder_inputs_embeds=decoder_inputs_embeds,
-                attention_mask=encoder_attention_mask,
-                decoder_attention_mask=decoder_attention_mask,
-                return_dict=True,
-                output_hidden_states=True,
-            )
-            decoder_hidden = out.decoder_hidden_states[-1][:, :L_out, :]
-            predicted = self.output_proj(decoder_hidden)
-            return predicted
-        else:
-            # Inference (autoregressive decoding)
-            decoder_inputs_embeds = torch.zeros((B, 1, self.d_model), device=x.device)
-            outputs = []
-            for t in range(L_out):
-                out = self.t5(
-                    inputs_embeds=encoder_input,
-                    decoder_inputs_embeds=decoder_inputs_embeds,
-                    attention_mask=encoder_attention_mask,
-                    output_hidden_states=True,
-                    return_dict=True,
-                )
-                last_hidden = out.decoder_hidden_states[-1][:, -1:, :]  # [B, 1, d_model]
-                out_embed = self.output_proj(last_hidden)  # [B, 1, output_dim]
-                outputs.append(out_embed)
+            end = start + chunk_size
 
-                next_embed = self.embed_proj(out_embed)
-                decoder_inputs_embeds = torch.cat([decoder_inputs_embeds, next_embed], dim=1)
+            x_chunk = x[start:end]
+            mask_chunk = embedding_mask_x[start:end]
 
-            return torch.cat(outputs, dim=1)
+            # out_chunk = self.input_proj(x_chunk, mask_chunk)
+            x_chunk = x_chunk[:, :, :1792, :1792]
+            out_chunk = self.input_proj(x_chunk)
+
+            chunks.append(out_chunk)
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            max_allocated = torch.cuda.max_memory_allocated() / 1024**2
+
+            print("-------------------------------------------------------")
+            print(f"Chunk #: {len(chunks)}")
+            print(f"GPU allocated: {allocated:.2f} MB")
+            print(f"GPU reserved: {reserved:.2f} MB")
+            print(f"Max allocated: {max_allocated:.2f} MB")
+            print("-------------------------------------------------------")
+
+        # final output is a tensor
+        encoder_input = torch.cat(chunks, dim=0)      
+        print(encoder_input.shape)
+
+        # if use_teacher_forcing:
+        #     assert y is not None, "y must be provided during teacher forcing"
+        #     # Shift y right and embed it to T5 space
+        #     # fix this code
+        #     decoder_inputs = torch.zeros_like(y)
+        #     decoder_inputs[:, 1:] = y[:, :-1]  # shift right
+        #     decoder_inputs_embeds = self.embed_proj(decoder_inputs, embedding_mask_y)
+
+        #     # Training path
+        #     out = self.t5(
+        #         inputs_embeds=encoder_input,
+        #         decoder_inputs_embeds=decoder_inputs_embeds,
+        #         attention_mask=encoder_attention_mask,
+        #         decoder_attention_mask=decoder_attention_mask,
+        #         return_dict=True,
+        #         output_hidden_states=True,
+        #     )
+        #     decoder_hidden = out.decoder_hidden_states[-1][:, :L_out, :]
+        #     predicted = self.output_proj(decoder_hidden)
+        #     return predicted
+        # else:
+        #     # Inference (autoregressive decoding)
+        #     decoder_inputs_embeds = torch.zeros((B, 1, self.d_model), device=x.device)
+        #     outputs = []
+        #     for t in range(L_out):
+        #         out = self.t5(
+        #             inputs_embeds=encoder_input,
+        #             decoder_inputs_embeds=decoder_inputs_embeds,
+        #             attention_mask=encoder_attention_mask,
+        #             output_hidden_states=True,
+        #             return_dict=True,
+        #         )
+        #         last_hidden = out.decoder_hidden_states[-1][:, -1:, :]  # [B, 1, d_model]
+        #         out_embed = self.output_proj(last_hidden)  # [B, 1, output_dim]
+        #         outputs.append(out_embed)
+
+        #         next_embed = self.embed_proj(out_embed)
+        #         decoder_inputs_embeds = torch.cat([decoder_inputs_embeds, next_embed], dim=1)
+
+        #     return torch.cat(outputs, dim=1)
+   
 
 class CustomGradientDataset(Dataset):
     def __init__(self, dataset_size, small_gradients_paths, large_gradients_paths, indices):

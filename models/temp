@@ -1,0 +1,305 @@
+###############################################################################
+# BSD 3-Clause License
+#
+# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+#   
+# Copyright (c) 2017, Soumith Chintala. All rights reserved.
+###############################################################################
+'''
+Code adapted from https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py
+Introduced partial convolutions based padding for convolutional layers
+Modified to support variable-size inputs via external padding + mask propagation
+'''
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import torch.utils.model_zoo as model_zoo
+from .partialconv2d import PartialConv2d
+
+__all__ = ['PDResNet', 'pdresnet18', 'pdresnet34', 'pdresnet50', 'pdresnet101',
+           'pdresnet152']
+
+model_urls = {
+    'pdresnet18': '',
+    'pdresnet34': '',
+    'pdresnet50': '',
+    'pdresnet101': '',
+    'pdresnet152': '',
+}
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution without padding (padding handled externally via mask)"""
+    return PartialConv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                         padding=0, bias=False, return_mask=True)
+
+
+def pad_to_same(x, target_h, target_w):
+    """
+    Pad x to (target_h, target_w) and return a binary mask.
+    Mask: 1 = valid (real data), 0 = invalid (padded region).
+    """
+    b, c, h, w = x.shape
+    pad_h = target_h - h
+    pad_w = target_w - w
+    pad_top    = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left   = pad_w // 2
+    pad_right  = pad_w - pad_left
+
+    x_padded = F.pad(x, (pad_left, pad_right, pad_top, pad_bottom), value=0)
+
+    mask = torch.zeros(b, 1, target_h, target_w, device=x.device, dtype=x.dtype)
+    mask[:, :, pad_top:pad_top + h, pad_left:pad_left + w] = 1.0
+
+    return x_padded, mask
+
+
+def pad_mask_for_conv(mask, pad):
+    """Add zero-padding to a mask tensor (used before conv with padding=0)."""
+    return F.pad(mask, (pad, pad, pad, pad), value=0)
+
+
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(BasicBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x, mask=None):
+        residual = x
+
+        # conv1: pad spatially before conv (kernel=3 → pad=1)
+        x_pad  = F.pad(x,    (1, 1, 1, 1), value=0)
+        m_pad  = pad_mask_for_conv(mask, 1) if mask is not None else None
+        out, mask = self.conv1(x_pad, m_pad)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        # conv2
+        out_pad = F.pad(out,  (1, 1, 1, 1), value=0)
+        m_pad   = pad_mask_for_conv(mask, 1) if mask is not None else None
+        out, mask = self.conv2(out_pad, m_pad)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            residual, _ = self.downsample(x, mask)
+
+        out += residual
+        out = self.relu(out)
+
+        return out, mask
+
+
+class DownsampleWithMask(nn.Module):
+    """Wraps a downsample Sequential so it can accept and return a mask."""
+    def __init__(self, conv, bn):
+        super(DownsampleWithMask, self).__init__()
+        self.conv = conv  # PartialConv2d, kernel=1
+        self.bn   = bn
+
+    def forward(self, x, mask=None):
+        # kernel=1 → no spatial padding needed
+        out, mask_out = self.conv(x, mask)
+        out = self.bn(out)
+        return out, mask_out
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(Bottleneck, self).__init__()
+        # 1x1 conv — no padding needed
+        self.conv1 = PartialConv2d(inplanes, planes, kernel_size=1,
+                                   bias=False, return_mask=True)
+        self.bn1 = nn.BatchNorm2d(planes)
+
+        # 3x3 conv — padding handled externally
+        self.conv2 = PartialConv2d(planes, planes, kernel_size=3, stride=stride,
+                                   padding=0, bias=False, return_mask=True)
+        self.bn2 = nn.BatchNorm2d(planes)
+
+        # 1x1 conv — no padding needed
+        self.conv3 = PartialConv2d(planes, planes * self.expansion, kernel_size=1,
+                                   bias=False, return_mask=True)
+        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample  # should be DownsampleWithMask or None
+        self.stride = stride
+
+    def forward(self, x, mask=None):
+        residual = x
+
+        # --- conv1: 1x1, no padding ---
+        out, mask = self.conv1(x, mask)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        # --- conv2: 3x3, pad externally before passing ---
+        out_pad = F.pad(out,  (1, 1, 1, 1), value=0)
+        m_pad   = pad_mask_for_conv(mask, 1) if mask is not None else None
+        out, mask = self.conv2(out_pad, m_pad)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        # --- conv3: 1x1, no padding ---
+        out, mask = self.conv3(out, mask)
+        out = self.bn3(out)
+
+        # --- downsample residual if needed ---
+        if self.downsample is not None:
+            residual, _ = self.downsample(x, mask)
+
+        out += residual
+        out = self.relu(out)
+
+        return out, mask
+
+
+class PDResNet(nn.Module):
+
+    def __init__(self, block, layers, num_classes=1000):
+        self.inplanes = 64
+        super(PDResNet, self).__init__()
+
+        # First conv: kernel=7, stride=2 — padding handled externally
+        self.conv1 = PartialConv2d(3, 64, kernel_size=7, stride=2,
+                                   padding=0, bias=False, return_mask=True)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.layer1 = self._make_layer(block, 64,  layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))  # handles variable spatial size
+        # self.fc = nn.Linear(512 * block.expansion, num_classes)
+
+        for m in self.modules():
+            if isinstance(m, PartialConv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = DownsampleWithMask(
+                PartialConv2d(self.inplanes, planes * block.expansion,
+                              kernel_size=1, stride=stride,
+                              bias=False, return_mask=True),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return nn.ModuleList(layers)  # ModuleList so we can pass mask through
+
+    def _run_layer(self, layer_list, x, mask):
+        """Iterate blocks in a layer, passing mask through each."""
+        for block in layer_list:
+            x, mask = block(x, mask)
+        return x, mask
+
+    def forward(self, batch):
+        """
+        Args:
+            batch: list of tensors with variable spatial sizes [C, H, W]
+                   OR a single pre-padded tensor [B, C, H, W] with mask already handled.
+        """
+        # --- Handle variable-size batch ---
+        if isinstance(batch, (list, tuple)):
+            max_h = max(x.shape[1] for x in batch)
+            max_w = max(x.shape[2] for x in batch)
+            padded, masks = [], []
+            for x in batch:
+                x = x.unsqueeze(0)  # [1, C, H, W]
+                x_pad, mask = pad_to_same(x, max_h, max_w)
+                padded.append(x_pad)
+                masks.append(mask)
+            x    = torch.cat(padded, dim=0)   # [B, C, max_h, max_w]
+            mask = torch.cat(masks,  dim=0)   # [B, 1, max_h, max_w]
+        else:
+            # Already a batched tensor — assume no padding mask needed
+            x = batch
+            mask = None
+
+        # --- stem: conv1, kernel=7, pad=3 externally ---
+        x_pad  = F.pad(x,    (3, 3, 3, 3), value=0)
+        m_pad  = pad_mask_for_conv(mask, 3) if mask is not None else None
+        x, mask = self.conv1(x_pad, m_pad)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        # maxpool doesn't update mask; downsample mask manually to match
+        x    = self.maxpool(x)
+        if mask is not None:
+            mask = F.max_pool2d(mask, kernel_size=3, stride=2, padding=1)
+
+        # --- residual layers ---
+        x, mask = self._run_layer(self.layer1, x, mask)
+        x, mask = self._run_layer(self.layer2, x, mask)
+        x, mask = self._run_layer(self.layer3, x, mask)
+        x, mask = self._run_layer(self.layer4, x, mask)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        print(x.shape)  # fixed: shape is a property, not a method
+        # x = self.fc(x)
+
+        return x
+
+
+# ---------- model constructors ----------
+
+def pdresnet18(pretrained=False, **kwargs):
+    model = PDResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['pdresnet18']))
+    return model
+
+
+def pdresnet34(pretrained=False, **kwargs):
+    model = PDResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['pdresnet34']))
+    return model
+
+
+def pdresnet50(pretrained=False, **kwargs):
+    model = PDResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['pdresnet50']))
+    return model
+
+
+def pdresnet101(pretrained=False, **kwargs):
+    model = PDResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['pdresnet101']))
+    return model
+
+
+def pdresnet152(pretrained=False, **kwargs):
+    model = PDResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['pdresnet152']))
+    return model
