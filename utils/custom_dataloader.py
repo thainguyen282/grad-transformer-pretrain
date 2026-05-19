@@ -66,7 +66,6 @@ class IndexDataset(torch.utils.data.Dataset):
         return len(self.indices)
 
     def __getitem__(self, pos):
-        print("reach here")
         idx = self.indices[pos]
 
         subset_size = self.num_noisy_samples ** 2
@@ -96,11 +95,9 @@ class IndexDataset(torch.utils.data.Dataset):
             ),
             weights_only=True
         )
-        print("loading data")
         x_list, x_masks = pad_sequence_to_target(x_list, self.target_h, self.target_w)
         y_list, y_masks = pad_sequence_to_target(y_list, self.target_h, self.target_w)  
         x_list, x_masks, y_list, y_masks = x_list.to(dtype=torch.bfloat16), x_masks.to(dtype=torch.bfloat16), y_list.to(dtype=torch.bfloat16), y_masks.to(dtype=torch.bfloat16)
-
         return x_list, y_list, x_masks, y_masks
 
 def collate_fn(batch):

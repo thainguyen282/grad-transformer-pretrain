@@ -18,25 +18,128 @@ from tqdm import tqdm
 project_root = os.path.join(os.path.dirname(__file__), '../..')
 sys.path.insert(0, os.path.abspath(project_root))
 from utils.transformer import Embedding2EmbeddingT5
-from utils.custom_dataloader import build_dataloader, IndexDataset
+from models.pd_resnet import pdresnet18
 
 
-def masked_mse_loss(pred, target, mask=None):
-    nonzero_mask = (target != 0).any(dim=-1)  
-    if mask is not None:
-        combined_mask = mask & nonzero_mask
-    else:
-        combined_mask = nonzero_mask  
-    mask_f = combined_mask.unsqueeze(-1).to(dtype=pred.dtype)
+def masked_mse_loss(pred, target, mask):
+    mask_f = mask.unsqueeze(-1).to(dtype=pred.dtype)
     valid = mask_f.sum()
     if valid.item() == 0:
         raise ValueError("Mask is all False!!!")
     
-    if valid.item() == 0:
-        return torch.tensor(0.0, requires_grad=True, device=pred.device)
+    se = (pred - target).pow(2) * mask_f 
+    return se.sum() / (valid * pred.size(-1)) # average of loss weight
 
-    se = (pred - target).pow(2) * mask_f
-    return se.sum() / (valid * pred.size(-1))
+
+def variable_lout_collate_fn(batch, l_out):
+    x_batch, y_batch = zip(*batch)
+    # x_batch = torch.stack(x_batch, dim=0)
+    input_dim = x_batch[0].shape[-1]
+    output_dim = y_batch[0].shape[-1]
+    B = len(y_batch)
+    x_padded = torch.zeros(B, l_out, input_dim, dtype=x_batch[0].dtype)
+    y_padded = torch.zeros(B, l_out, output_dim, dtype=y_batch[0].dtype)
+    encoder_mask = torch.zeros(B, l_out, dtype=torch.bool)
+    decoder_mask = torch.zeros(B, l_out, dtype=torch.bool)
+
+    for i, (x, y) in enumerate(zip(x_batch, y_batch)):
+        lx = min(x.shape[0], l_out)
+        ly = min(y.shape[0], l_out)
+
+        x_padded[i, :lx, :] = x[:lx]
+        y_padded[i, :ly, :] = y[:ly]
+        encoder_mask[i, :lx] = True
+        decoder_mask[i, :ly] = True
+
+    return x_padded, y_padded, encoder_mask, decoder_mask
+
+
+def load_sample_from_disk(index: int, model_pairs, model_load_path, num_noisy_samples):
+    subset_size = num_noisy_samples ** 2
+    pair_idx  = index // subset_size
+    data_pair = index % subset_size
+    small_idx = data_pair // num_noisy_samples
+    large_idx = data_pair % num_noisy_samples
+    small_model_path, large_model_path = model_pairs[pair_idx]
+    x = torch.load(os.path.join(model_load_path, "gradients", small_model_path, f"gradient_base_{small_idx+1}.pt"), weights_only=True)
+    y = torch.load(os.path.join(model_load_path, "gradients", large_model_path, f"gradient_base_{large_idx+1}.pt"), weights_only=True)
+    return x, y
+
+
+class IndexDataset(Dataset):
+
+    def __init__(self, indices, model_pairs, model_load_path, num_noisy_samples):
+        self.indices = indices
+        self.model_pairs = model_pairs
+        self.model_load_path = model_load_path
+        self.num_noisy_samples = num_noisy_samples
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, pos):
+        idx = self.indices[pos]
+        x, y = load_sample_from_disk(
+            idx,
+            self.model_pairs,
+            self.model_load_path,
+            self.num_noisy_samples,
+        )
+
+        # x = x.float()
+        # y = y.float()  # or .long() if y is a class label
+
+        # if self.transform:
+        #     x = self.transform(x)
+
+        return x, y
+
+class InMemoryGradientDataset(Dataset):
+    def __init__(self, small_gradients, large_gradients, indices=None):
+        assert len(small_gradients) == len(large_gradients), (
+            f"small_gradients ({len(small_gradients)}) and "
+            f"large_gradients ({len(large_gradients)}) must have the same length"
+        )
+        self.small_gradients = small_gradients
+        self.large_gradients = large_gradients
+        self.dataset_size = len(small_gradients)
+        self.indices = list(range(self.dataset_size)) if indices is None else indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        actual_idx = self.indices[idx]
+        try:
+            return self.small_gradients[actual_idx], self.large_gradients[actual_idx]
+        except IndexError:
+            print(f"Index out of range: {actual_idx} (dataset size: {self.dataset_size})")
+            raise
+
+
+class ArchitectureWrapper(nn.Module):
+    def __init__(self, cnn, grad_transformer, decnn):
+        super().__init__()
+        self.cnn = cnn
+        self.grad_transformer = grad_transformer
+        self.decnn = decnn
+    
+    def forward(self, x, y=None, L_out = 1, mask_in = None, mask_out = None, use_teacher_forcing = False):
+        """
+            x will be a list of module [B, n, k, k]
+            mask will be a list of masking respect to module [B, n, k, k]
+            
+            OUTPUT:
+            out_cnn: will be list of each module's unified representation [B, n, d]
+            out_grad: will be list of predicted target model list of each module's unified representation [B, n, d]
+            update_vector: ... [B, n, k, k]
+        """
+        out_cnn = self.cnn(x, mask_in)
+        out_grad = self.grad_transformer(x = out_cnn, y=None, L_out=L_out, use_teacher_forcing=False)
+        update_vector = self.decnn(out_grad, mask_out)
+        return update_vector
+
+
 
 def run_train_grad_transformer(args, console):
     args_dict = vars(args)
@@ -52,16 +155,31 @@ def run_train_grad_transformer(args, console):
     accelerator.init_trackers("embedding2embedding", config=args_dict)
     wandb.init(project="embedding2embedding", config=args_dict)
     model_load_path = args.save_dir
-    model_pairs = [("Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen2.5-3B-Instruct")]
 
-    model = Embedding2EmbeddingT5(
+    model_pairs = []
+    model_pairs_config_path = os.path.join(project_root, args.model_pairs_config)
+    with open(model_pairs_config_path, 'r') as f:
+        config = json.load(f)
+        model_pairs = [
+            (pair['small_model_path'], pair['large_model_path'])
+            for pair in config.get('model_pairs', [])
+        ]
+    print(f"Loaded {len(model_pairs)} model pairs from {model_pairs_config_path}")
+
+    cnn_model = pdresnet18()
+
+    grad_transformer = Embedding2EmbeddingT5(
         input_dim=args.dim,
         output_dim=args.dim,
         freeze_t5=args.freeze_t5,
         base_model=args.base_model_path,
     )
-    # model.to(device, dtype=torch.bfloat16)
+
+    decnn_model = pdresnet18()
+
+    model = ArchitectureWrapper(cnn_model, grad_transformer, decnn_model)
     model.to(device)
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {num_params:,}")
 
@@ -106,20 +224,25 @@ def run_train_grad_transformer(args, console):
         else:
             train_indices.append(perm[i].item())
 
-    train_dataset = IndexDataset(train_indices, model_pairs, model_load_path, args.num_noisy_samples, args.target_h, args.target_w)
+    train_dataset = IndexDataset(train_indices, model_pairs, model_load_path, args.num_noisy_samples)
     train_loader =  DataLoader(
         train_dataset,
         batch_size=args.batch_size, 
+        collate_fn=(lambda batch: variable_lout_collate_fn(batch, args.l_out)), 
         num_workers=0,
         shuffle=True,
     )
-    val_dataset = IndexDataset(val_indices, model_pairs, model_load_path, args.num_noisy_samples, args.target_h, args.target_w)
+    val_dataset = IndexDataset(val_indices, model_pairs, model_load_path, args.num_noisy_samples)
     val_loader =  DataLoader(
         val_dataset,
         batch_size=args.batch_size, 
+        collate_fn=(lambda batch: variable_lout_collate_fn(batch, args.l_out)), 
         num_workers=0,
         shuffle=True,
-    )  
+    )
+
+
+
     
     if args.eval_per:
         eval_per = args.eval_per
@@ -129,44 +252,52 @@ def run_train_grad_transformer(args, console):
     train_loader, val_loader = accelerator.prepare(train_loader, val_loader)
 
     print(f"Evaluate every {eval_per} steps")
+    
     print('TRAINING STARTED…')
     for epoch in tqdm(range(args.num_epochs)):
         model.train()
         total_loss = 0.0
         layer_loss = [0] * args.l_out
         
-        # for xb, yb, encoder_mask, decoder_mask in tqdm(train_loader, desc="Training"):
-        for xb, yb, embedding_mask_x, embedding_mask_y in tqdm(train_loader, desc="Training"):
+        for xb, yb, encoder_mask, decoder_mask in tqdm(train_loader, desc="Training"):
+            print("reach here")
             step += 1
             optimizer.zero_grad()
-            # pred = model(x=xb, y=yb, L_out=args.l_out, use_teacher_forcing=True,
-            #                 encoder_attention_mask=encoder_mask.long(), decoder_attention_mask=decoder_mask.long()) # (batch_size, L_out, embedding_size))
-            pred, yb_pad = model(x=xb, y=yb, embedding_mask_x=embedding_mask_x, embedding_mask_y=embedding_mask_y, L_out = args.l_out, use_teacher_forcing=True) # (batch_size, L_out, embedidng_size)
-            loss = masked_mse_loss(pred, yb_pad)
+            pred = model(x=xb, y=yb, L_out=args.l_out, use_teacher_forcing=True,
+                            encoder_attention_mask=encoder_mask.long(), decoder_attention_mask=decoder_mask.long()) # (batch_size, L_out, embedding_size))
+            loss = masked_mse_loss(pred, yb, decoder_mask)
             accelerator.backward(loss)
             optimizer.step()
             total_loss += loss.item()
             if step % eval_per == 0:
                 model.eval()
+
                 val_loss_sum = torch.tensor(0.0, device=accelerator.device)
                 val_count = torch.tensor(0.0, device=accelerator.device)
                 layer_loss_sum = torch.zeros(args.l_out, device=accelerator.device)
                 layer_count = torch.zeros(args.l_out, device=accelerator.device)
 
                 with torch.no_grad():
-                    for xb, yb, embedding_mask_x, embedding_mask_y in tqdm(val_loader, desc="Validating"):
-                        pred, yb_pad = model(x=xb, y=yb, embedding_mask_x=embedding_mask_x, embedding_mask_y=embedding_mask_y, L_out = args.l_out, use_teacher_forcing=True) # (batch_size, L_out, embedidng_size)
-            
-                        loss = masked_mse_loss(pred, yb_pad)
+                    for xb, yb, encoder_mask, decoder_mask in tqdm(val_loader, desc="Validating"):
+                        pred = model(
+                            x=xb, y=yb, L_out=args.l_out, use_teacher_forcing=False,
+                            encoder_attention_mask=encoder_mask.long(),
+                            decoder_attention_mask=decoder_mask.long()
+                        )
+                        loss = masked_mse_loss(pred, yb, decoder_mask)
                         bs = xb.size(0)
                         val_loss_sum += loss  * bs
                         val_count += bs
 
                         for layer in range(args.l_out):
-                            layer_loss_sum[layer] += masked_mse_loss(
-                                pred[:, layer:layer+1, :],
-                                yb[:, layer:layer+1, :],
-                            )
+                            layer_mask = decoder_mask[:, layer]
+                            if layer_mask.any():
+                                layer_loss_sum[layer] += masked_mse_loss(
+                                    pred[:, layer:layer+1, :],
+                                    yb[:, layer:layer+1, :],
+                                    decoder_mask[:, layer:layer+1],
+                                ) * layer_mask.sum()
+                                layer_count[layer] += layer_mask.sum()
                                 
                 # Reduce across all processes
                 val_loss_sum = accelerator.reduce(val_loss_sum, reduction="sum")

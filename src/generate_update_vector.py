@@ -73,7 +73,7 @@ def generate_update_vector(args, console: Console):
         label = os.path.basename(model_path)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            device_map="cpu",
+            device_map="auto",
             torch_dtype=torch.bfloat16,
         )
 

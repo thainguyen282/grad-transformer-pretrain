@@ -89,6 +89,14 @@ def add_train_grad_transformer_args(parser):
         help='option to include target model in training set'
     )
     parser.add_argument(
+        "--target_w", type=int, default=2048, 
+        help="target size after padding"
+    )
+    parser.add_argument(
+        "--target_h", type=int, default=2048, 
+        help="target_size after padding"
+    )
+    parser.add_argument(
         "--split", type=float, default=0.9,
         help='Train fraction of the dataset.',
     )
