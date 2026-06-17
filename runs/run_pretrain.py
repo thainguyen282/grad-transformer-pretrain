@@ -10,7 +10,6 @@ def run(args: Namespace, console: Console):
     log_rich(
         message="Running GTA training process for pretraining models",
         console=console,
-        new_line=True,
     )
 
     # Build dataset
