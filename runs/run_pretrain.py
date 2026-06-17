@@ -18,6 +18,7 @@ def run(args: Namespace, console: Console):
         model_dict_path=args.path_to_model_dict,
         save_dir=args.data_save_dir,
         console=console,
+        num_samples=args.num_samples_per_train_dataset,
     )
     if not dataset.processed:
         dataset.preprocessing()
