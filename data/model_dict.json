@@ -2,11 +2,13 @@
     "qwen2.5_3b_instruct":
     {
         "name": "Qwen/Qwen2.5-3B-Instruct",
-        "size": 3.0
+        "size": 3.0,
+        "noise": 0.01
     },
     "qwen2.5_1.5b_instruct": {
         "name": "Qwen/Qwen2.5-1.5B-Instruct",
-        "size": 1.5
+        "size": 1.5,
+        "noise": 0.01
     }
     
 }

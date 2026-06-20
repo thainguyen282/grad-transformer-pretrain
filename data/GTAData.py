@@ -155,9 +155,11 @@ class GTADataset(Dataset):
         model_key = None
         for k, v in self.model_info_dict.items():
             if v["name"] == model_name:
-                model_meta_dict_path = k
+                model_meta_dict_path = v["meta_info_vector_path"]
+                noise = v["noise"] if "noise" in v else 0.0
                 break
         model_meta_dict = torch.load(model_meta_dict_path)
+        # model_meta_dict
 
         # add the weight to the model meta dict, if the weigh has bias, concatenate the bias into the weight and store a boolean flag to indicate that the bias is concatenated
         model = AutoModel.from_pretrained(model_name).to("cpu")
@@ -232,6 +234,10 @@ class GTADataset(Dataset):
                 continue
 
             weight = model_meta_dict[key]["weight"]
+            # add Gaussian noise to the weight if noise_scale > 0
+            if noise > 0.0:
+                weight += (1 + noise) * torch.randn_like(weight)
+
             padded_weight = torch.zeros(
                 (self.padding_size, self.padding_size), dtype=weight.dtype
             )
@@ -269,6 +275,11 @@ class GTADataset(Dataset):
             model_info_dict[model_key] = {
                 "name": model_name,
                 "meta_info_vector_path": meta_info_path,
+                "noise": (
+                    self.model_dict[model_key]["noise"]
+                    if "noise" in self.model_dict[model_key]
+                    else 0.0
+                ),
             }
 
         # save the model_info_dict for future reference
