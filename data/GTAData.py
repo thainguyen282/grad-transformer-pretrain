@@ -33,6 +33,7 @@ class GTADataset(Dataset):
         self.target_model = target_model
         self.target_mode = target_mode
         self.padding_size = padding_size
+        self.save_dir = save_dir
 
         if target_mode:
             assert (
