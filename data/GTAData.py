@@ -258,6 +258,14 @@ class GTADataset(Dataset):
         save_path = os.path.join(
             self.save_dir, self.meta_embedding_model.split("/")[-1]
         )
+        if not os.path.exists(save_path):
+            log_rich(
+                message=f"Creating save directory for meta information vectors at: {save_path}",
+                console=self.console,
+                label="INFO",
+                newline=True,
+            )
+            os.makedirs(save_path, exist_ok=True)
         self.console.log(
             f"Preprocessing GTA dataset using {self.meta_embedding_model} model and saving meta information vectors to {save_path}"
         )
