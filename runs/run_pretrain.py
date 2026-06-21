@@ -45,4 +45,14 @@ def run(args: Namespace, console: Console):
                 message=f"Target model dicts: {target_model_dicts.keys()}",
                 console=console,
             )
+            for key in source_model_dicts.keys():
+                log_rich(
+                    message=f"Source model dicts[{key}]: {source_model_dicts[key].shape}",
+                    console=console,
+                )
+            for key in target_model_dicts.keys():
+                log_rich(
+                    message=f"Target model dicts[{key}]: {target_model_dicts[key].shape}",
+                    console=console,
+                )
             break
