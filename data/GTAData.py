@@ -449,6 +449,10 @@ def GTA_collate_fn(batch, padding_size: int = 2048):
                 target_return_dict[key]
             )  # (batch_size, max_num_weights + 1, meta_info_dim)
 
+    for key in souce_model_dict_final.keys():
+        souce_model_dict_final[key] = torch.cat(souce_model_dict_final[key], dim=0)
+        target_model_dict_final[key] = torch.cat(target_model_dict_final[key], dim=0)
+
     return souce_model_dict_final, target_model_dict_final
 
 
