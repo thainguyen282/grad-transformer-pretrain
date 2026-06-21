@@ -35,24 +35,23 @@ def run(args: Namespace, console: Console):
 
     if args.debug:
         # take one batch and print the shapes of the tensors
-        for batch in dataloader:
-            source_model_dicts, target_model_dicts = batch
+        batch = dataset[0]
+        source_model_dicts, target_model_dicts = batch
+        log_rich(
+            message=f"Source model dicts: {source_model_dicts.keys()}",
+            console=console,
+        )
+        log_rich(
+            message=f"Target model dicts: {target_model_dicts.keys()}",
+            console=console,
+        )
+        for key in source_model_dicts.keys():
             log_rich(
-                message=f"Source model dicts: {source_model_dicts.keys()}",
+                message=f"Source model dicts[{key}]: {source_model_dicts[key].shape}",
                 console=console,
             )
+        for key in target_model_dicts.keys():
             log_rich(
-                message=f"Target model dicts: {target_model_dicts.keys()}",
+                message=f"Target model dicts[{key}]: {target_model_dicts[key].shape}",
                 console=console,
             )
-            for key in source_model_dicts.keys():
-                log_rich(
-                    message=f"Source model dicts[{key}]: {source_model_dicts[key].shape}",
-                    console=console,
-                )
-            for key in target_model_dicts.keys():
-                log_rich(
-                    message=f"Target model dicts[{key}]: {target_model_dicts[key].shape}",
-                    console=console,
-                )
-            break
