@@ -386,7 +386,7 @@ class GTADataset(Dataset):
             k
             for k in self.model_dict.keys()
             if (k != source_model_key)
-            and self.model_dict[k]["size"] > source_model_size
+            and self.model_dict[k]["size"] != source_model_size
         ]
         target_model_key = random.choice(target_model_keys)
 
