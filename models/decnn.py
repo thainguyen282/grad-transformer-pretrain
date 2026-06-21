@@ -1,60 +1,112 @@
 import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DECNN(nn.Module):
-    def __init__(self, latent_dim=2048, output_size=2048):
-        super(DECNN, self).__init__()
-        self.output_size = output_size
+def _num_doublings(start_size: int, target_size: int) -> int:
+    """How many stride-2 doublings to reach >= target_size from start_size."""
+    if target_size <= start_size:
+        return 0
+    return math.ceil(math.log2(target_size / start_size))
 
-        # 1) vector → feature map
-        self.fc = nn.Sequential(
-            nn.Linear(latent_dim, 1024 * 4 * 4),
-            nn.LayerNorm(1024 * 4 * 4),
-            nn.ReLU(inplace=True)
+
+class DECNN(nn.Module):
+    """
+    Args:
+        hidden_dim: size of the input hidden/latent vector (flat embedding,
+            no spatial structure — shape (hidden_dim,)).
+        target_shape: (channels, height, width) of the desired output image.
+        base_channels: channel count right after the initial projection.
+        start_size: spatial size (S x S) the embedding gets "unfolded" into
+            before the doubling stages begin.
+        min_channels: channel count won't be halved below this on the way down.
+        use_linear_projection: if True (default), use nn.Linear + reshape to
+            create the (base_channels, start_size, start_size) seed. If False,
+            skip the Linear entirely and instead treat the embedding as a
+            (hidden_dim, 1, 1) tensor, using a single
+            ConvTranspose2d(kernel_size=start_size, stride=1, padding=0) as the
+            first deconv layer to do the same unfolding. The two are
+            mathematically equivalent (both are just a learned linear map from
+            hidden_dim -> base_channels*start_size*start_size); use
+            use_linear_projection=False if you want the model to be "pure
+            conv" with no nn.Linear layer, e.g. to match a DCGAN-style
+            generator convention.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        target_shape: tuple[int, int, int],
+        base_channels: int = 256,
+        start_size: int = 4,
+        min_channels: int = 32,
+        use_linear_projection: bool = True,
+    ):
+        super().__init__()
+        out_channels, target_h, target_w = target_shape
+        self.start_size = start_size
+        self.base_channels = base_channels
+        self.use_linear_projection = use_linear_projection
+        self.hidden_dim = hidden_dim
+
+        n_layers = max(
+            _num_doublings(start_size, target_h),
+            _num_doublings(start_size, target_w),
+            1,  # always at least one upsampling stage
         )
 
-        # 2) upsampling backbone (hidden inside one class)
-        def block(in_c, out_c):
-            return nn.Sequential(
-                nn.ConvTranspose2d(in_c, out_c, 4, 2, 1),
-                nn.BatchNorm2d(out_c),
-                nn.ReLU(inplace=True)
+        if use_linear_projection:
+            # Embedding -> Linear -> reshape to (base_channels, start_size, start_size)
+            self.project = nn.Linear(
+                hidden_dim, base_channels * start_size * start_size
+            )
+            self.first_conv = None
+        else:
+            # Embedding -> reshape to (hidden_dim, 1, 1) -> single ConvTranspose2d
+            # unfolds it straight to (base_channels, start_size, start_size).
+            # Equivalent to the Linear above, but stays purely convolutional.
+            self.project = None
+            self.first_conv = nn.Sequential(
+                nn.ConvTranspose2d(
+                    hidden_dim,
+                    base_channels,
+                    kernel_size=start_size,
+                    stride=1,
+                    padding=0,
+                ),
+                nn.BatchNorm2d(base_channels),
+                nn.ReLU(inplace=True),
             )
 
-        decoder_blocks = []
-        in_channels = 1024
-        channels = [1024, 512, 256, 128, 64, 32, 16, 8, 4]
-        spatial_size = 4
-        while spatial_size < output_size:
-            out_channels = channels[min(len(decoder_blocks), len(channels) - 1)]
-            decoder_blocks.append(block(in_channels, out_channels))
-            in_channels = out_channels
-            spatial_size *= 2
+        layers = []
+        in_ch = base_channels
+        for _ in range(n_layers):
+            out_ch = max(in_ch // 2, min_channels)
+            layers += [
+                nn.ConvTranspose2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+            ]
+            in_ch = out_ch
 
-        self.decoder = nn.Sequential(*decoder_blocks)
+        # Snap to the exact requested (H, W) and channel count.
+        layers += [
+            nn.Upsample(
+                size=(target_h, target_w), mode="bilinear", align_corners=False
+            ),
+            nn.Conv2d(in_ch, out_channels, kernel_size=3, padding=1),
+            nn.Tanh(),
+        ]
 
-        # 3) output head
-        self.out = nn.Sequential(
-            nn.Conv2d(in_channels, 1, kernel_size=3, stride=1, padding=1),
-            nn.Tanh()
-        )
+        self.decoder = nn.Sequential(*layers)
 
-    def forward(self, x):
-        if x.dim() < 2:
-            raise ValueError(f"Expected latent tensor with shape [..., D], got {x.shape}")
-
-        leading_shape = x.shape[:-1]
-        latent_dim = x.shape[-1]
-        x = x.reshape(-1, latent_dim)
-
-        x = self.fc(x)                     # (N, 1024*4*4)
-        x = x.view(-1, 1024, 4, 4)         # reshape
-        x = self.decoder(x)                # upsampling stack
-        if x.size(-1) != self.output_size or x.size(-2) != self.output_size:
-            x = F.interpolate(x, size=(self.output_size, self.output_size), mode="bilinear", align_corners=False)
-        x = self.out(x)                    # grayscale output
-        x = x.squeeze(1)
-        x = x.reshape(*leading_shape, *x.shape[1:])
-        return x
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        # z: (batch, hidden_dim) -- a flat embedding, no spatial structure.
+        if self.use_linear_projection:
+            x = self.project(z)
+            x = x.view(-1, self.base_channels, self.start_size, self.start_size)
+        else:
+            x = z.view(-1, self.hidden_dim, 1, 1)
+            x = self.first_conv(x)
+        return self.decoder(x)

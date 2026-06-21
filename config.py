@@ -21,6 +21,11 @@ def add_general_args(parser):
         default=42,
         help="Random seed for reproducibility.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with more verbose logging and checks.",
+    )
 
 
 def add_training_data_args(parser):

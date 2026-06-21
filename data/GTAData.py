@@ -384,3 +384,138 @@ class GTADataset(Dataset):
         source_model_name = self.model_dict[source_model_key]["name"]
         target_model_name = self.model_dict[target_model_key]["name"]
         return source_model_name, target_model_name
+
+
+def GTA_collate_fn(batch, padding_size: int = 2048):
+    """
+    Collate function to combine a list of samples into a batch
+    Need padding for the number of weights in the source and target models, but the weight matrices are already padded to the same size
+
+    tensor_dict = {
+        "meta_info": meta_info_tensor,  # (num_weights + 1, meta_info_dim)
+        "weight": weight_tensor,  # (num_weights, padding_size, padding_size)
+        "mask": mask_tensor,  # (num_weights, padding_size, padding_size)
+        "has_bias": has_bias_tensor,  # (num_weights,)
+    }
+
+    create attention masks
+    """
+
+    souce_model_dict_final = {
+        "meta_info": [],
+        "meta_info_attn_mask": [],
+        "weight": [],
+        "mask": [],
+        "has_bias": [],
+        "weight_attn_mask": [],
+    }
+    target_model_dict_final = {
+        "meta_info": [],
+        "meta_info_attn_mask": [],
+        "weight": [],
+        "mask": [],
+        "has_bias": [],
+        "weight_attn_mask": [],
+    }
+
+    # take the max number of weights in the source and target models for padding
+    source_max_num_weights = 0
+    target_max_num_weights = 0
+
+    for sample in batch:
+        source_model_dict, target_model_dict = sample
+        source_max_num_weights = max(
+            source_max_num_weights, source_model_dict["weight"].size(0)
+        )
+        target_max_num_weights = max(
+            target_max_num_weights, target_model_dict["weight"].size(0)
+        )
+
+    for sample in batch:
+        source_model_dict, target_model_dict = sample
+        source_return_dict = _process_one_dict(
+            source_model_dict, source_max_num_weights, padding_size
+        )
+        for key in source_return_dict.keys():
+            souce_model_dict_final[key].append(
+                source_return_dict[key]
+            )  # (batch_size, max_num_weights + 1, meta_info_dim)
+
+        target_return_dict = _process_one_dict(
+            target_model_dict, target_max_num_weights, padding_size
+        )
+        for key in target_return_dict.keys():
+            target_model_dict_final[key].append(
+                target_return_dict[key]
+            )  # (batch_size, max_num_weights + 1, meta_info_dim)
+
+    return souce_model_dict_final, target_model_dict_final
+
+
+def _process_one_dict(
+    model_dict: dict, max_num_weights: int, padding_size: int
+) -> dict:
+
+    return_dict = {
+        "meta_info": [],
+        "meta_info_attn_mask": [],
+        "weight": [],
+        "mask": [],
+        "has_bias": [],
+        "weight_attn_mask": [],
+    }
+
+    for key in model_dict.keys():
+        if key == "meta_info":
+            if model_dict[key].size(0) < max_num_weights + 1:
+                pad_size = max_num_weights + 1 - model_dict[key].size(0)
+                pad_tensor = torch.zeros(
+                    (pad_size, model_dict[key].size(1)), dtype=model_dict[key].dtype
+                )
+                return_dict[key].append(
+                    torch.cat([pad_tensor, model_dict[key]], dim=0).unsqueeze(0)
+                )
+                return_dict["meta_info_attn_mask"].append(
+                    torch.cat(
+                        [
+                            torch.zeros((pad_size,), dtype=torch.bool),
+                            torch.ones((model_dict[key].size(0),), dtype=torch.bool),
+                        ],
+                        dim=0,
+                    ).unsqueeze(0)
+                )  # (1, max_num_weights + 1, meta_info_dim)
+        elif key == "weight":
+            if model_dict[key].size(0) < max_num_weights:
+                pad_size = max_num_weights - model_dict[key].size(0)
+                pad_tensor = torch.zeros(
+                    (pad_size, padding_size, padding_size), dtype=model_dict[key].dtype
+                )
+                return_dict[key].append(
+                    torch.cat([pad_tensor, model_dict[key]], dim=0).unsqueeze(0)
+                )
+                return_dict["weight_attn_mask"].append(
+                    torch.cat(
+                        [
+                            torch.zeros((pad_size,), dtype=torch.bool),
+                            torch.ones((model_dict[key].size(0),), dtype=torch.bool),
+                        ],
+                        dim=0,
+                    ).unsqueeze(0)
+                )  # (1, max_num_weights, padding_size, padding_size)
+        elif key == "mask":
+            if model_dict[key].size(0) < max_num_weights:
+                pad_size = max_num_weights - model_dict[key].size(0)
+                pad_tensor = torch.zeros(
+                    (pad_size, padding_size, padding_size), dtype=model_dict[key].dtype
+                )
+                return_dict[key].append(
+                    torch.cat([pad_tensor, model_dict[key]], dim=0).unsqueeze(0)
+                )  # (1, max_num_weights, padding_size, padding_size)
+        else:
+            if model_dict[key].size(0) < max_num_weights:
+                pad_size = max_num_weights - model_dict[key].size(0)
+                pad_tensor = torch.zeros((pad_size,), dtype=model_dict[key].dtype)
+                return_dict[key].append(
+                    torch.cat([pad_tensor, model_dict[key]], dim=0).unsqueeze(0)
+                )  # (1, max_num_weights)
+    return return_dict
