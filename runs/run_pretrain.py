@@ -29,7 +29,7 @@ def run(args: Namespace, console: Console):
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=4,
         collate_fn=lambda batch: GTA_collate_fn(batch, padding_size=args.padding_size),
     )
 
