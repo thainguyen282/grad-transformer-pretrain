@@ -28,7 +28,7 @@ def run(args: Namespace, console: Console):
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         collate_fn=lambda batch: GTA_collate_fn(batch, padding_size=args.padding_size),
     )
