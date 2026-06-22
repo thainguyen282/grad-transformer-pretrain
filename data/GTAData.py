@@ -246,6 +246,9 @@ class GTADataset(Dataset):
             if key == "model_meta_info":
                 continue
 
+            if key == "embed_tokens":
+                continue
+
             weight = model_meta_dict[key]["weight"]
             if self.debug:
                 self.console.log(
