@@ -248,11 +248,13 @@ class GTADataset(Dataset):
             if "embed_tokens" in key:
                 continue
 
-            weight = model_meta_dict[key]["weight"]
             if self.debug:
                 self.console.log(
                     f"Processing weight {key} of model {model_name} with original shape {weight.size()} and noise scale {noise}"
                 )
+
+            weight = model_meta_dict[key]["weight"]
+
             # add Gaussian noise to the weight if noise_scale > 0
             if noise > 0.0:
                 weight += (1 + noise) * torch.randn_like(weight)
