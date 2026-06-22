@@ -332,6 +332,7 @@ class GTADataset(Dataset):
                     else 0.0
                 ),
             }
+            gc.collect()
 
         # save the model_info_dict for future reference
         with open(os.path.join(save_path, "meta_info_dict.json"), "w") as f:
@@ -456,6 +457,10 @@ class GTADataset(Dataset):
         self.console.log(
             f"Saved meta information for model {model_name} at {model_save_dir}"
         )
+
+        del model_meta_dict
+        gc.collect()
+
         return model_save_dir
 
     def _get_meta_information(
