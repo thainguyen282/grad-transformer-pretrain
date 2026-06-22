@@ -35,6 +35,7 @@ class GTADataset(Dataset):
         self.padding_size = padding_size
         self.save_dir = save_dir
         self.skip_lm_head = args.skip_lm_head
+        self.skip_layer_norm = args.skip_layer_norm
 
         if target_mode:
             assert (
