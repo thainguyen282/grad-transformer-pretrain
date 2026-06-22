@@ -36,6 +36,7 @@ class GTADataset(Dataset):
         self.save_dir = save_dir
         self.skip_lm_head = args.skip_lm_head
         self.skip_layer_norm = args.skip_layer_norm
+        self.debug = args.debug
 
         if target_mode:
             assert (
@@ -246,9 +247,10 @@ class GTADataset(Dataset):
                 continue
 
             weight = model_meta_dict[key]["weight"]
-            self.console.log(
-                f"Processing weight {key} of model {model_name} with original shape {weight.size()} and noise scale {noise}"
-            )
+            if self.debug:
+                self.console.log(
+                    f"Processing weight {key} of model {model_name} with original shape {weight.size()} and noise scale {noise}"
+                )
             # add Gaussian noise to the weight if noise_scale > 0
             if noise > 0.0:
                 weight += (1 + noise) * torch.randn_like(weight)
