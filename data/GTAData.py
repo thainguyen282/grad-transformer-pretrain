@@ -186,7 +186,7 @@ class GTADataset(Dataset):
                         del model_meta_dict[weight_meta_info_vector_name]
                     continue
 
-            if "embed_tokens" in key:
+            if "embed_tokens" in name:
                 # del that key from the model_meta_dict if exists
                 weight_name = name.replace(".weight", "").replace(".bias", "")
                 weight_meta_info_vector_name = f"{weight_name.replace('.', '_')}"
