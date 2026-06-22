@@ -48,52 +48,100 @@ class GTAModel(torch.nn.Module):
             }
         """
 
-        # project the meta info and weights to the hidden dimension
-        source_meta_info = source_model_dict[
-            "meta_info"
-        ]  # (num_weights + 1, meta_info_dim)
-        source_weight = source_model_dict[
-            "weight"
-        ]  # (num_weights, padding_size, padding_size)
+        source_emb = self._extract_embedding_source(source_model_dict)
+        target_emb, target_attn_mask = self._extract_embedding_target(target_model_dict)
 
-        source_meta_emb = self.meta_projection(
-            source_meta_info
-        )  # (num_weights + 1, hidden_dim)
-        source_weight_emb = self.cnn(
-            source_weight
-        ).squeeze()  # (num_weights, cnn_output_dim)
-        source_weight_emb = self.weight_projection(
-            source_weight_emb
-        )  # (num_weights, hidden_dim)
+        attention_mask = torch.cat(
+            [torch.zeros(source_emb.size(1)), target_attn_mask], dim=0
+        ).unsqueeze(0)
 
-        model_meta_emb = source_meta_emb[0, :].unsqueeze(0)  # (1, hidden_dim)
-        weight_concat = [model_meta_emb]
-        for i in range(0, source_weight_emb.size(0)):
-            weight_concat.append(
-                source_meta_emb[i + 1, :].unsqueeze(0)
-            )  # (1, hidden_dim)
-            weight_concat.append(
-                source_weight_emb[i, :].unsqueeze(0)
-            )  # (1, hidden_dim)
-        source_combined_emb = torch.cat(
-            weight_concat, dim=0
-        )  # (num_weights * 2+1, hidden_dim)
+        # concatenate the source and target embeddings along the sequence dimension
+        combined_emb = torch.cat([source_emb, target_emb], dim=1)  # (B, Ls * 4+2, h)
 
-        # Do for the target model as well.
-        target_meta_info = target_model_dict["meta_info"]
-        target_weight = target_model_dict["weight"]
-        target_meta_emb = self.meta_projection(target_meta_info)
-        target_weight_emb = self.cnn(target_weight).squeeze()
-        target_weight_emb = self.weight_projection(target_weight_emb)
-        target_model_meta_emb = target_meta_emb[0, :].unsqueeze(0)
-        target_weight_concat = [target_model_meta_emb]
-        for i in range(0, target_weight_emb.size(0)):
-            target_weight_concat.append(
-                target_meta_emb[i + 1, :].unsqueeze(0)
-            )  # (1, hidden_dim)
-            target_weight_concat.append(
-                target_weight_emb[i, :].unsqueeze(0)
-            )  # (1, hidden_dim)
-        target_combined_emb = torch.cat(
-            target_weight_concat, dim=0
-        )  # (num_weights * 2+1, hidden_dim)
+        output = self.deCNN(combined_emb)  # (B, 1, padding_size, padding_size)
+        return output
+
+    def _extract_embedding_source(self, model_dict: dict):
+
+        meta_info = model_dict["meta_info"]  # (B, Ls, emb_dim)
+        weight = model_dict["weight"]  # (B, Ls, P, P)
+        meta_attn_mask = model_dict["meta_info_attn_mask"]  # (B, Ls)
+        weight_attn_mask = model_dict["weight_attn_mask"]  # (B, Ls)
+
+        meta_emb = self.meta_projection(meta_info)  # (B, Ls, h)
+        weight_emb = []
+        for i in range(weight.size(1)):
+            weight_emb.append(
+                self.cnn(weight[:, i, :, :].unsqueeze(1)).squeeze()
+            )  # (B, cnn_output_dim)
+        weight_emb = torch.stack(weight_emb, dim=1)  # (B, Ls, cnn_output_dim)
+        weight_emb = self.weight_projection(weight_emb)  # (B, Ls, h)
+
+        combined_emb = []
+        for i in range(meta_emb.size(0)):
+            comb_emb = []
+            start = False
+            for j in range(meta_emb.size(1)):
+                if meta_attn_mask[i, j] == 0:
+                    comb_emb.append(torch.zeros_like(meta_emb[i, j, :]).unsqueeze(0))
+                if start == False:
+                    start = True
+                    comb_emb.append(meta_emb[i, j, :].unsqueeze(0))  # meta model
+                    continue
+                comb_emb.append(meta_emb[i, j, :].unsqueeze(0))  # (1, h)
+                comb_emb.append(weight_emb[i, j, :].unsqueeze(0))  # (1, h)
+            combined_emb.append(
+                torch.cat(comb_emb, dim=0).unsqueeze(0)
+            )  # (1, Ls * 2+1, h)
+        combined_emb = torch.cat(combined_emb, dim=0)  # (B, Ls * 2+1, h)
+        return combined_emb
+
+    def _extract_embedding_target(self, model_dict: dict):
+
+        meta_info = model_dict["meta_info"]  # (B, Ls, emb_dim)
+        weight = model_dict["weight"]  # (B, Ls, P, P)
+        meta_attn_mask = model_dict["meta_info_attn_mask"]  # (B, Ls)
+        weight_attn_mask = model_dict["weight_attn_mask"]  # (B, Ls)
+
+        meta_emb = self.meta_projection(meta_info)  # (B, Ls, h)
+        weight_emb = []
+        for i in range(weight.size(1)):
+            weight_emb.append(
+                self.cnn(weight[:, i, :, :].unsqueeze(1)).squeeze()
+            )  # (B, cnn_output_dim)
+        weight_emb = torch.stack(weight_emb, dim=1)  # (B, Ls, cnn_output_dim)
+        weight_emb = self.weight_projection(weight_emb)  # (B, Ls, h)
+
+        combined_emb = []
+        attention_mask = []
+
+        for i in range(meta_emb.size(0)):
+            comb_emb = []
+            pad_emb = []
+            attn_mask = []
+            start = False
+            for j in range(meta_emb.size(1)):
+                if meta_attn_mask[i, j] == 0:
+                    pad_emb.append(torch.zeros_like(meta_emb[i, j, :]).unsqueeze(0))
+                if start == False:
+                    start = True
+                    comb_emb.append(meta_emb[i, j, :].unsqueeze(0))  # meta model
+                    attn_mask.append(0)  # meta model does not attend to any weight
+                    continue
+                comb_emb.append(meta_emb[i, j, :].unsqueeze(0))  # (1, h)
+                attn_mask.append(0)  # meta info does not attend to any weight
+                comb_emb.append(weight_emb[i, j, :].unsqueeze(0))  # (1, h)
+                attn_mask.append(1)  # weight embedding attends to the meta info
+
+            for pad in pad_emb:
+                comb_emb.append(pad)
+                attn_mask.append(0)  # padding does not attend to any weight
+            combined_emb.append(
+                torch.cat(comb_emb, dim=0).unsqueeze(0)
+            )  # (1, Ls * 2+1, h)
+            attention_mask.append(attn_mask)
+        combined_emb = torch.cat(combined_emb, dim=0)  # (B, Ls * 2+1, h)
+        attention_mask = torch.tensor(attention_mask).to(
+            combined_emb.device
+        )  # (B, Ls * 2+1)
+        return combined_emb, attention_mask

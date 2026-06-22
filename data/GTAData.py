@@ -397,12 +397,7 @@ class GTADataset(Dataset):
         source_model_key = source_model_keys[idx % len(source_model_keys)]
         source_model_size = self.model_dict[source_model_key]["size"]
 
-        target_model_keys = [
-            k
-            for k in self.model_dict.keys()
-            if (k != source_model_key)
-            and self.model_dict[k]["size"] != source_model_size
-        ]
+        target_model_keys = [k for k in self.model_dict.keys() if k != source_model_key]
         target_model_key = random.choice(target_model_keys)
 
         source_model_name = self.model_dict[source_model_key]["name"]
