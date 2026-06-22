@@ -316,8 +316,12 @@ class GTADataset(Dataset):
             self.model_dict.keys(), desc="Processing models for GTA dataset"
         ):
             model_name = self.model_dict[model_key]["name"]
+            noise = self.model_dict[model_key]["noise"]
             meta_info_path = self._preprocessing_single_model(
-                model_name=model_name, emb_model=emb_model, save_path=save_path
+                model_name=model_name,
+                emb_model=emb_model,
+                save_path=save_path,
+                noise=noise,
             )
             model_info_dict[model_key] = {
                 "name": model_name,
@@ -337,7 +341,11 @@ class GTADataset(Dataset):
         self.processed = True
 
     def _preprocessing_single_model(
-        self, model_name: str, emb_model: SentenceTransformer, save_path: str
+        self,
+        model_name: str,
+        emb_model: SentenceTransformer,
+        save_path: str,
+        noise: float = 0.0,
     ) -> str:
 
         self.console.log(f"Processing model {model_name} for GTA dataset")
@@ -356,24 +364,93 @@ class GTADataset(Dataset):
             - weight matrix size (normalized by max weight matrix size in the model)
             - weight type (e.g., attention k, v, q, mlp, mixture of experts, gated, etc.)
         """
-        for name, _ in model.named_parameters(remove_duplicate=False):
+        for name, param in model.named_parameters(remove_duplicate=False):
             if self.skip_lm_head:
                 if "lm_head" in name:
                     continue
             if self.skip_layer_norm:
                 if "norm" in name:
                     continue
+            if "embed_tokens" in name:
+                continue
+
             weight_name = name
+            is_bias = False
+
             if "bias" in weight_name:
                 weight_name = weight_name.replace(".bias", ".weight")
+                is_bias = True
             weight_name = weight_name.replace(".weight", "")
-            if weight_name in model_meta_dict:
-                continue
+
             meta_info_vector = emb_model.encode(
                 weight_name, convert_to_tensor=True
             ).cpu()
             weight_meta_info_vector_name = f"{weight_name.replace('.', '_')}"
-            model_meta_dict[weight_meta_info_vector_name] = meta_info_vector
+
+            if is_bias:
+                if weight_meta_info_vector_name in model_meta_dict.keys():
+                    # Already has weight, concatenate the bias to the existing weight
+                    model_meta_dict[weight_meta_info_vector_name]["weight"] = torch.cat(
+                        [
+                            model_meta_dict[weight_meta_info_vector_name]["weight"],
+                            torch.unsqueeze(param.data.cpu(), dim=1),
+                        ],
+                        dim=1,
+                    ).to(torch.float16)
+                    model_meta_dict[weight_meta_info_vector_name]["has_bias"] = True
+                else:
+                    model_meta_dict[weight_meta_info_vector_name] = {
+                        "meta_info_vector": meta_info_vector.to(torch.float16),
+                        "weight": param.data.cpu().to(torch.float16),
+                        "has_bias": True,
+                        "has_weight": False,
+                    }
+            else:
+                if weight_meta_info_vector_name in model_meta_dict.keys():
+                    # Already has bias, concatenate the weight to the existing bias
+                    model_meta_dict[weight_meta_info_vector_name]["weight"] = torch.cat(
+                        [
+                            param.data.cpu(),
+                            torch.unsqueeze(
+                                model_meta_dict[weight_meta_info_vector_name]["weight"],
+                                dim=1,
+                            ),
+                        ],
+                        dim=1,
+                    ).to(torch.float16)
+                    model_meta_dict[weight_meta_info_vector_name]["has_weight"] = True
+                else:
+                    model_meta_dict[weight_meta_info_vector_name] = {
+                        "meta_info_vector": meta_info_vector.to(torch.float16),
+                        "weight": param.data.cpu().to(torch.float16),
+                        "has_bias": False,
+                        "has_weight": True,
+                    }
+
+        for key in model_meta_dict.keys():
+
+            if key == "model_meta_info":
+                continue
+            if "embed_tokens" in key:
+                continue
+
+            if self.debug:
+                self.console.log(f"Processing weight {key} of model {model_name}")
+
+            weight = model_meta_dict[key]["weight"]
+
+            # add Gaussian noise to the weight if noise_scale > 0
+            if noise > 0.0:
+                weight += (1 + noise) * torch.randn_like(weight)
+
+            padded_weight = torch.zeros(
+                (self.padding_size, self.padding_size), dtype=weight.dtype
+            )
+            padded_weight[: weight.size(0), : weight.size(1)] = weight
+            mask = torch.zeros((self.padding_size, self.padding_size), dtype=torch.bool)
+            mask[: weight.size(0), : weight.size(1)] = True
+            model_meta_dict[key]["weight"] = padded_weight.to(torch.float16)
+            model_meta_dict[key]["mask"] = mask
 
         torch.save(model_meta_dict, model_save_dir)
         self.console.log(
