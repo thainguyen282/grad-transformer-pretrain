@@ -186,6 +186,8 @@ class GTADataset(Dataset):
                         del model_meta_dict[weight_meta_info_vector_name]
                     continue
 
+            # TODO: Propose mechanism for embedding layer.
+
             if "embed_tokens" in name:
                 # del that key from the model_meta_dict if exists
                 weight_name = name.replace(".weight", "").replace(".bias", "")
@@ -216,15 +218,15 @@ class GTADataset(Dataset):
                                     torch.unsqueeze(param.data.cpu(), dim=1),
                                 ],
                                 dim=1,
-                            )
+                            ).to(torch.float16)
                         )
                         model_meta_dict[weight_meta_info_vector_name]["has_bias"] = True
                     else:
                         model_meta_dict[weight_meta_info_vector_name] = {
                             "meta_info_vector": model_meta_dict[
                                 weight_meta_info_vector_name
-                            ],
-                            "weight": param.data.cpu(),
+                            ].to(torch.float16),
+                            "weight": param.data.cpu().to(torch.float16),
                             "has_bias": True,
                             "has_weight": False,
                         }
@@ -243,7 +245,7 @@ class GTADataset(Dataset):
                                     ),
                                 ],
                                 dim=1,
-                            )
+                            ).to(torch.float16)
                         )
                         model_meta_dict[weight_meta_info_vector_name][
                             "has_weight"
@@ -252,8 +254,8 @@ class GTADataset(Dataset):
                         model_meta_dict[weight_meta_info_vector_name] = {
                             "meta_info_vector": model_meta_dict[
                                 weight_meta_info_vector_name
-                            ],
-                            "weight": param.data.cpu(),
+                            ].to(torch.float16),
+                            "weight": param.data.cpu().to(torch.float16),
                             "has_bias": False,
                             "has_weight": True,
                         }
@@ -281,7 +283,7 @@ class GTADataset(Dataset):
             padded_weight[: weight.size(0), : weight.size(1)] = weight
             mask = torch.zeros((self.padding_size, self.padding_size), dtype=torch.bool)
             mask[: weight.size(0), : weight.size(1)] = True
-            model_meta_dict[key]["weight"] = padded_weight
+            model_meta_dict[key]["weight"] = padded_weight.to(torch.float16)
             model_meta_dict[key]["mask"] = mask
 
         return model_meta_dict
