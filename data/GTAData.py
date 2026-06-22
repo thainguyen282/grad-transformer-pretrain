@@ -171,10 +171,28 @@ class GTADataset(Dataset):
 
             if self.skip_lm_head:
                 if "lm_head" in name:
+                    # del that key from the model_meta_dict if exists
+                    weight_name = name.replace(".weight", "").replace(".bias", "")
+                    weight_meta_info_vector_name = f"{weight_name.replace('.', '_')}"
+                    if weight_meta_info_vector_name in model_meta_dict.keys():
+                        del model_meta_dict[weight_meta_info_vector_name]
                     continue
             if self.skip_layer_norm:
                 if "norm" in name:
+                    # del that key from the model_meta_dict if exists
+                    weight_name = name.replace(".weight", "").replace(".bias", "")
+                    weight_meta_info_vector_name = f"{weight_name.replace('.', '_')}"
+                    if weight_meta_info_vector_name in model_meta_dict.keys():
+                        del model_meta_dict[weight_meta_info_vector_name]
                     continue
+
+            if "embed_tokens" in key:
+                # del that key from the model_meta_dict if exists
+                weight_name = name.replace(".weight", "").replace(".bias", "")
+                weight_meta_info_vector_name = f"{weight_name.replace('.', '_')}"
+                if weight_meta_info_vector_name in model_meta_dict.keys():
+                    del model_meta_dict[weight_meta_info_vector_name]
+                continue
 
             weight_name = name
             is_bias = False
@@ -249,9 +267,7 @@ class GTADataset(Dataset):
                 continue
 
             if self.debug:
-                self.console.log(
-                    f"Processing weight {key} of model {model_name} with original shape {weight.size()} and noise scale {noise}"
-                )
+                self.console.log(f"Processing weight {key} of model {model_name}")
 
             weight = model_meta_dict[key]["weight"]
 
