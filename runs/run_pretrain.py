@@ -20,6 +20,7 @@ def run(args: Namespace, console: Console):
         save_dir=args.data_save_dir,
         console=console,
         num_samples=args.num_samples_per_train_dataset,
+        padding_size=args.padding_size,
     )
     if not dataset.processed:
         dataset.preprocessing()
