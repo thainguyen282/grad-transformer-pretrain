@@ -241,10 +241,14 @@ class GTADataset(Dataset):
 
         # Padding the weight matrix to the max weight matrix size in the model and create a mask to indicate the original weight size
         for key in model_meta_dict.keys():
+
             if key == "model_meta_info":
                 continue
 
             weight = model_meta_dict[key]["weight"]
+            self.console.log(
+                f"Processing weight {key} of model {model_name} with original shape {weight.size()} and noise scale {noise}"
+            )
             # add Gaussian noise to the weight if noise_scale > 0
             if noise > 0.0:
                 weight += (1 + noise) * torch.randn_like(weight)
