@@ -80,6 +80,16 @@ def add_training_data_args(parser):
         default="Qwen/Qwen3-Embedding-8B",
         help="Hugging Face model name for generating meta-embeddings as input features for GTA.",
     )
+    parser.add_argument(
+        "--skip_lm_head",
+        action="store_true",
+        help="Whether to skip the LM head when generating meta-embeddings (use only the transformer outputs).",
+    )
+    parser.add_argument(
+        "--skip_layer_norm",
+        action="store_true",
+        help="Whether to skip layer normalization when generating meta-embeddings.",
+    )
 
 
 def add_testing_data_args(parser):

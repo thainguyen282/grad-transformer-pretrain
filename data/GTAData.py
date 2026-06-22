@@ -34,6 +34,7 @@ class GTADataset(Dataset):
         self.target_mode = target_mode
         self.padding_size = padding_size
         self.save_dir = save_dir
+        self.skip_lm_head = args.skip_lm_head
 
         if target_mode:
             assert (
@@ -162,9 +163,17 @@ class GTADataset(Dataset):
         model_meta_dict = torch.load(model_meta_dict_path)
         # model_meta_dict
 
-        # add the weight to the model meta dict, if the weigh has bias, concatenate the bias into the weight and store a boolean flag to indicate that the bias is concatenated
+        # add the wedight to the model meta dict, if the weigh has bias, concatenate the bias into the weight and store a boolean flag to indicate that the bias is concatenated
         model = AutoModel.from_pretrained(model_name).to("cpu")
         for name, param in model.named_parameters(remove_duplicate=False):
+
+            if self.skip_lm_head:
+                if "lm_head" in name:
+                    continue
+            if self.skip_layer_norm:
+                if "norm" in name:
+                    continue
+
             weight_name = name
             is_bias = False
 
@@ -319,6 +328,12 @@ class GTADataset(Dataset):
             - weight type (e.g., attention k, v, q, mlp, mixture of experts, gated, etc.)
         """
         for name, _ in model.named_parameters(remove_duplicate=False):
+            if self.skip_lm_head:
+                if "lm_head" in name:
+                    continue
+            if self.skip_layer_norm:
+                if "norm" in name:
+                    continue
             weight_name = name
             if "bias" in weight_name:
                 weight_name = weight_name.replace(".bias", ".weight")
